@@ -5,16 +5,18 @@ THREE.js r100
 // Global Variables
 let canvas = document.getElementById("myCanvas");
 let camera0, scene0, renderer, controls, clock, stats;
-let composer, depthTarget, depthMaterial;
+let composer, depthTarget, depthRendTexture, depthMaterial;
 let textureLoader;
 let Textures = {
 	fog: null,
 	smoke: null,
 	smokeBig: null,
+	point: null,
 };
 let Lights = [];
-let particles, smokeAnimator;
+let smokeParticles, smokeAnimator, pointsParticles;
 let shadows = true;
+let cameraRotator, rotatingCamera = false;
 
 
 function init() {
@@ -30,12 +32,11 @@ function init() {
 	// Scene
 	scene0 = new THREE.Scene();
 	scene0.background = new THREE.Color( 0x000000 );
-	scene0.fog = new THREE.Fog( 0x101010, 20 , 40 );
+	// scene0.fog = new THREE.Fog( 0x101010, 20 , 40 );
 	
 	// Camera
-	camera0 = new THREE.PerspectiveCamera( 60, window.innerWidth / window.innerHeight, 0.1, 1000 );
+	camera0 = new THREE.PerspectiveCamera( 60, window.innerWidth / window.innerHeight, 0.1, 500 );
 	camera0.position.set( 0 , 5.5 , 10 );
-	
 	
 	// Clock
 	clock = new THREE.Clock();
@@ -46,16 +47,10 @@ function init() {
 	
 	// Loaders
 	textureLoader = new THREE.TextureLoader();
-
-	// Resize Event
-	window.addEventListener("resize", function(){
-		renderer.setSize( window.innerWidth, window.innerHeight );
-		camera0.aspect = window.innerWidth / window.innerHeight;
-		camera0.updateProjectionMatrix();
-	}, false);
 	
 	// Inits
-	initControls();
+	depthMaterial = new THREE.MeshDepthMaterial();
+	if( !rotatingCamera ) initControls();
 	initTextures();
 	
 	initLights();
@@ -64,11 +59,28 @@ function init() {
 	initPostProcessing();
 	
 	if( shadows ) renderer.shadowMap.needsUpdate = true;
+	
+	// Resize Event
+	window.addEventListener("resize", function(){
+		renderer.setSize( window.innerWidth, window.innerHeight );
+		depthTarget.setSize( window.innerWidth, window.innerHeight );
+		camera0.aspect = window.innerWidth / window.innerHeight;
+		camera0.updateProjectionMatrix();
+	}, false);
 }
 
 let createStartingMesh = function(){
+	if( rotatingCamera ){
+		cameraRotator = new THREE.Group();
+		cameraRotator.add( camera0 );
+		cameraRotator.position.set( 0 , 2 , 0 );
+		camera0.position.set( 0 , 2 , 10 );
+		camera0.lookAt( new THREE.Vector3(0 , 0 , 0) );
+		scene0.add( cameraRotator );
+	}
+	
 	let floor = new THREE.Mesh(
-		new THREE.PlaneBufferGeometry( 30 , 1000 ),
+		new THREE.PlaneBufferGeometry( 30 , 400 ),
 		new THREE.MeshPhongMaterial({
 			color: 0x105020,
 			shininess: 0,
@@ -121,80 +133,122 @@ let initParticles = function(){
 	// smokeAnimator = new TextureAnimator( Textures.fog, 2, 2, 4, 100 );
 	smokeAnimator = new TextureAnimator( Textures.smoke, 6, 5, 30, 80 );
 	
-	let pointsGeo = new THREE.BufferGeometry();
+	// SMOKE
+	let smokeGeo = new THREE.BufferGeometry();
 	
-	let numOfParticles = 20;
-	let spreadX = 20, spreadY = 4, spreadZ = 20; // 20 4 20
+	let numOfParticles = 20; // 20
+	let spreadX = 18, spreadY = 4, spreadZ = 18; // 20 4 20
 	let origin = new THREE.Vector3( 0 , 1 , 0 ); // 0 1 0
 	
 	let posArr = [];
 	for( let i = 0; i < numOfParticles; i++ ){
 		let x = Math.random() * spreadX - spreadX/2.0 + origin.x;
 		let y = Math.random() * spreadY - spreadY/2.0 + origin.y;
-		// let y = 4;
+		// let y = 0;
 		let z = Math.random() * spreadZ - spreadZ/2.0 + origin.z;
 		
 		posArr.push( x , y , z );
+		// posArr.push( -4 , 0 , 3 );
 	}
+	
+	smokeGeo.addAttribute( 'position' , new THREE.Float32BufferAttribute( posArr , 3 ) );
+	
+	let newPointsMat = new THREE.ShaderMaterial( softParticlesShader );
+	newPointsMat.uniforms = {
+		// clippingPlanes: { value: null, needsUpdate: false },
+		diffuse: { value: new THREE.Color( 0.5 , 1.0 , 0.5 ) },
+		fogColor: { value: new THREE.Color( 0 , 0 , 0 ) },
+		fogDensity: { value: 0.00025 },
+		// fogFar: { value: scene0.fog.far },
+		// fogNear: { value: scene0.fog.near },
+		map: { value: Textures.smokeBig },
+		opacity: { value: 0.15 },
+		scale: { value: 329 },
+		size: { value: 25 }, // 30
+		uvTransform: { value: Textures.smokeBig.matrix },
+		// uvOffset: { value: Textures.smoke.offset },
+		fCamNear: { value: camera0.near },
+		fCamFar: { value: camera0.far },
+		sceneDepthTexture: { value: null },
+		screenSize: { value: new THREE.Vector2( canvas.width, canvas.height ) },
+	};
+	newPointsMat.sizeAttenuation = true;
+	newPointsMat.fog = true;
+	newPointsMat.transparent = true;
+	newPointsMat.map = Textures.smoke;
+	
+	newPointsMat.depthWrite = false;
+	newPointsMat.depthTest = false;
+	newPointsMat.blending = THREE.AdditiveBlending;
+	
+	smokeParticles = new THREE.Points( smokeGeo , newPointsMat );
+	scene0.add( smokeParticles );
+	
+	
+	// POINTS
+	let pointsGeo = new THREE.BufferGeometry();
+	numOfParticles = 70;
+	posArr = [];
+	for( let i = 0; i < numOfParticles; i++ ){
+		let x = Math.random() * spreadX - spreadX/2.0 + origin.x;
+		let y = Math.random() * spreadY - spreadY/2.0 + origin.y + 2;
+		let z = Math.random() * spreadZ - spreadZ/2.0 + origin.z;
+		
+		posArr.push( x , y , z );
+		
+	}
+	
 	pointsGeo.addAttribute( 'position' , new THREE.Float32BufferAttribute( posArr , 3 ) );
 	
 	let pointsMat = new THREE.PointsMaterial({
-		size: 20,
-		map: Textures.smokeBig,
+		color: 0x88ff88,
+		size: 3,
+		// map: Textures.point,
 		transparent: true,
-		opacity: 0.15,
+		opacity: 0.6,
 		blending: THREE.AdditiveBlending,
+		alphaTest: 0.2,
+		sizeAttenuation: false,
 		// depthTest: false,
-		depthWrite: false,
+		// depthWrite: false,
 	});
-	
-	particles = new THREE.Points( pointsGeo , pointsMat );
-	scene0.add( particles );
-	
-	/* 
-	for( let i = 0; i < posArr.length; i += 3 ){
-		let spriteMat = new THREE.SpriteMaterial({
-			map: Textures.smokeBig,
-			transparent: true,
-			opacity: 0.1,
-			blending: THREE.AdditiveBlending,
-		});
-		let sprite = new THREE.Sprite( spriteMat );
-		sprite.position.set( posArr[i], posArr[i+1], posArr[i+2] );
-		sprite.scale.multiplyScalar( Math.random()*2.0 + 9 );
-		sprite.material.rotation += Math.random();
-		scene0.add( sprite );
-	} */
+	pointsParticles = new THREE.Points( pointsGeo , pointsMat );
+	scene0.add( pointsParticles );
 }
 
 let initControls = function(){
-	controls = new THREE.OrbitControls( camera0 )
+	controls = new THREE.OrbitControls( camera0 );
 }
 
 let initTextures = function(){
 	Textures.fog = textureLoader.load('fogs.png');
 	Textures.smoke = textureLoader.load('smoke.png');
-	Textures.smokeBig = textureLoader.load('smokeBig.png');
+	Textures.smokeBig = textureLoader.load('smokeBig-64.png');
+	Textures.point = textureLoader.load('particle2.png');
 }
 
 let initPostProcessing = function(){
 	composer = new THREE.EffectComposer( renderer );
+	
+	depthRendTexture = new THREE.DepthTexture();
+	depthRendTexture.type = THREE.UnsignedShortType;
+	depthRendTexture.minFilter = THREE.NearestFilter;
+	depthRendTexture.maxFilter = THREE.NearestFilter;
+	
 	depthTarget = new THREE.WebGLRenderTarget( canvas.width, canvas.height, {
-
+		format: THREE.RGBAFormat,
+		depthTexture: depthRendTexture,
+		depthBuffer: true,
 	});
-	depthMaterial = new THREE.MeshDepthMaterial({
-		
-	});
-	depthMaterial.onBeforeCompile = function( shader ){
-		// console.log( shader.vertexShader );
-		// console.log( shader.fragmentShader );
-	}
-	// depthMaterial.depthPacking = THREE.RGBADepthPacking;
+	
+	smokeParticles.material.uniforms.sceneDepthTexture.value = depthRendTexture;
 	
 	// Passes
 	let renderPass = new THREE.RenderPass( scene0, camera0 );
-	myPass = new THREE.ShaderPass( reverseGrayscaleShader );
+	// myPass = new THREE.ShaderPass( reverseGrayscaleShader );
 	let fxaaPass = new THREE.ShaderPass( THREE.FXAAShader );
+	
+	// myPass.uniforms.tDepth.value = depthRendTexture;
 	
 	composer.addPass( renderPass );
 	// composer.addPass( myPass );
@@ -233,27 +287,38 @@ function animate() {
 	stats.begin();
 	let delta = clock.getDelta();
 	
-	camera0.near = 2.0;
-	camera0.updateProjectionMatrix();
+	if( rotatingCamera ) cameraRotator.rotation.y += 0.0025;
 	
-	scene0.overrideMaterial = depthMaterial;
-	renderer.render( scene0 , camera0 , depthTarget );
-	myPass.uniforms.tDepth.value = depthTarget.texture;
-	scene0.overrideMaterial = null;
+	// scene0.overrideMaterial = depthMaterial; // no need with DepthTexture()
+	renderer.render( scene0 , camera0 , depthTarget, true );
+	// scene0.overrideMaterial = null;
 	
 	// smokeAnimator.update( 1000*delta );
-	// particles.rotation.y += 0.0003;
-	
-	camera0.near = 0.1;
-	camera0.updateProjectionMatrix();
+	smokeParticles.rotation.y += 0.0002; 
 	
 	requestAnimationFrame( animate );
 	composer.render( scene0, camera0 );
+	
 	stats.end();
 }
 
 init();
 requestAnimationFrame( animate );
+
+/* 
+	clippingPlanes:{ value: null, needsUpdate: false }
+	diffuse: { value: Color }
+	fogColor: { value: Color }
+	fogDensity: { value: 0.00025 }
+	fogFar: { value: 40 }
+	fogNear: { value: 20 }
+	map: { value: null }
+	opacity: { value: 1 }
+	scale: { value: 329 }
+	size: { value: 10 }
+	uvTransform: { value: Matrix3 }
+ */
+
 
 /* 
 	uniform float size;
